@@ -36,39 +36,207 @@ struct pkt {
 
 /********* STUDENTS WRITE THE NEXT SEVEN ROUTINES *********/
 
+#define WINDOWSIZE 8
 
+//A, B's interface
+int A_base, B_base;
+int A_next_seqnum, B_next_seqnum;
+int A_Expected_seqnum, B_Expected_seqnum;
+int A_ACKstate, B_ACKstate;
+int A_ACKnum, B_ACKnum;
 
+//window buffer
+struct pkt *A_sender_window[WINDOWSIZE] = { 0 };
+struct pkt *B_sender_window[WINDOWSIZE] = { 0 };
+
+//Make AorB's Packet with data
+struct pkt *Make_pkt(aorb, data)
+  int aorb;
+  char data[20];
+{
+  //packet initialize
+  struct pkt *temp = (struct pkt *)malloc(sizeof(struct pkt));
+  temp->checksum = 0;  
+  
+  //Update payload and add checksum
+  for(int i = 0; i < 20; i++){
+    temp->payload[i] = data[i];
+    temp->checksum += data[i];
+  }
+  if(aorb == 0){    //if make A's packet
+    //update acknum and seqnum
+    temp->acknum = A_ACKnum;
+    temp->seqnum = A_next_seqnum;
+
+    //update checksum
+    temp->checksum += (A_ACKnum + A_next_seqnum);
+  }
+  else{             //if make B's packet
+    //update acknum and seqnum
+    temp->acknum = B_ACKnum;
+    temp->seqnum = B_next_seqnum;
+
+    //update checksum
+    temp->checksum += (B_ACKnum + B_next_seqnum);
+  }
+
+  //if over than 16-bit, checksum += 1
+  if(temp->checksum & 0xFFFF0000 != 0)  temp->checksum++;
+  //1's compliment
+  temp->checksum = ~(temp->checksum & 0x0000FFFF); 
+
+  return temp;
+}
+
+//Check packet's data with checksum
+int Check_sum(input)
+struct pkt input;
+{
+  //Add all data in packet
+  int temp = input.checksum;
+  temp += input.acknum;
+  temp += input.seqnum;
+  for(int i = 0; i < 20; i++)
+    temp += input.payload[i];
+  
+  //return result 16-bit
+  return temp & 0x0000FFFF;
+}
 
 /* called from layer 5, passed the data to be sent to other side */
 A_output(message)
   struct msg message;
 {
+  //If A's next seqnum in Window, Send packet
+  if( A_next_seqnum < A_base + WINDOWSIZE){
+    //If First sending, A's ACKnum is 999;
+    if(A_ACKstate == 0) A_ACKnum = 999;
+    struct pkt *send_pkt = Make_pkt(0, message.data);    //Make paket with message
 
+    //Check A's window is empty
+    int no_window = 1;
+    for(int i = 0; i < WINDOWSIZE; i++)
+      if(A_sender_window[i] != NULL){
+        no_window = 0;
+        break;
+      }
+
+    if(no_window == 1)    //if window is empty, start timer
+      starttimer(0, 15.0);
+
+    //Save paket in window
+    for(int i = 0; i < WINDOWSIZE; i++)
+      if(A_sender_window[i] == NULL){
+        A_sender_window[i] = send_pkt;
+        break;
+      }
+
+    //Send packet to layer 3
+    tolayer3(0, *send_pkt);
+
+    //Update A's ACKstate and next seqnum
+    A_ACKstate = 0;
+    A_next_seqnum++;
+  }
 }
 
 B_output(message)  /* need be completed only for extra credit */
   struct msg message;
 {
+  //If A's next seqnum in Window, Send packet
+  if( B_next_seqnum < B_base + WINDOWSIZE){
+    //If First sending, B's ACKnum is 999;
+    if(B_ACKstate == 0) B_ACKnum = 999;
+    struct pkt *send_pkt = Make_pkt(1, message.data);    //Make paket with message
 
+    //Check B's window is empty
+    int no_window = 1;
+    for(int i = 0; i < WINDOWSIZE; i++)
+      if(B_sender_window[i] != NULL){
+        no_window = 0;
+        break;
+      }
+
+    if(no_window == 1)    //if window is empty, start timer
+      starttimer(1, 15.0);
+
+    //Save paket in window
+    for(int i = 0; i < WINDOWSIZE; i++)
+      if(B_sender_window[i] == NULL){
+        B_sender_window[i] = send_pkt;
+        break;
+      }
+    
+    //Send packet to layer 3
+    tolayer3(1, *send_pkt);
+
+    //Update B's ACKstate and next seqnum
+    B_ACKstate = 0;
+    B_next_seqnum++;
+  }
 }
 
 /* called from layer 3, when a packet arrives for layer 4 */
 A_input(packet)
   struct pkt packet;
 {
+  //A sends packet
+  A_ACKstate = 1;
 
+  //if Checksum's result is 0
+  if(Check_sum(packet) == 0){
+    //Reciever
+    if(packet.seqnum == A_Expected_seqnum){
+      //A send data to layer 5
+      tolayer5(0, packet.payload);
+
+      //Send ACK packet to B
+      A_ACKnum = A_Expected_seqnum;
+      char temp_msg[20] = { 0 };
+      tolayer3(0, *Make_pkt(0, temp_msg));
+
+      //Update A's Expected seqnum
+      A_Expected_seqnum++;
+    }
+    //Sender
+    if(packet.acknum != 999){
+      //if Same acknum is in window, delete packet in window
+      for(int i = 0; i < WINDOWSIZE; i++)
+        if(A_sender_window[i]->seqnum == packet.acknum){
+          free(A_sender_window[i]);
+          A_sender_window[i] = NULL;
+          break;
+        }
+
+      A_base = packet.acknum + 1;
+      if(A_base == A_next_seqnum) stoptimer(0);   //if recieved all ACK, stop timer
+      else  starttimer(0, 15.0);          //if recieved packet, restart timer
+    }
+  }
 }
 
 /* called when A's timer goes off */
 A_timerinterrupt()
 {
-
+  //Send all packets in window
+  for(int i = A_base; i < A_next_seqnum - 1; i++){
+    for(int j = 0; j < WINDOWSIZE; j++){
+      if(A_sender_window[j]->seqnum == i)
+        tolayer3(0, *(A_sender_window[j]));
+    }
+  }
+  starttimer(1, 15.0);
 }  
 
 /* the following routine will be called once (only) before any other */
 /* entity A routines are called. You can use it to do any initialization */
 A_init()
 {
+  A_base = 1;
+  A_next_seqnum = 1;
+  A_Expected_seqnum = 1;
+  A_ACKstate = 0;
+  A_ACKnum = 0;
 }
 
 
@@ -78,17 +246,53 @@ A_init()
 B_input(packet)
   struct pkt packet;
 {
+  B_ACKstate = 1;
+  if(Check_sum(packet) == 0){
+    if(packet.seqnum == B_Expected_seqnum){
+      tolayer5(1, packet.payload);
+
+      B_ACKnum = B_Expected_seqnum;
+      char temp_msg[20] = { 0 };
+      tolayer3(1, *Make_pkt(1, temp_msg));
+
+      B_Expected_seqnum++;
+    }
+    if(packet.acknum != 999){
+      for(int i = 0; i < WINDOWSIZE; i++){
+        if(B_sender_window[i]->acknum == packet.acknum){
+          free(B_sender_window[i]);
+          B_sender_window[i] = NULL;
+        }
+      }
+      B_base = packet.acknum + 1;
+      if(B_base == B_next_seqnum) stoptimer(1);
+      else  starttimer(1, 15.0);
+    }
+  }
 }
 
 /* called when B's timer goes off */
 B_timerinterrupt()
 {
+  //Send all packets in window
+  for(int i = B_base; i < B_next_seqnum - 1; i++){
+    for(int j = 0; j < WINDOWSIZE; j++){
+      if(B_sender_window[j]->seqnum == i)
+        tolayer3(0, *(B_sender_window[j]));
+    }
+  }
+  starttimer(1, 15.0);
 }
 
 /* the following rouytine will be called once (only) before any other */
 /* entity B routines are called. You can use it to do any initialization */
 B_init()
 {
+  B_base = 1;
+  B_next_seqnum = 1;
+  B_Expected_seqnum = 1;
+  B_ACKstate = 0;
+  B_ACKnum = 0;
 }
 
 
@@ -269,7 +473,7 @@ init()                         /* initialize the simulator */
 /****************************************************************************/
 float jimsrand() 
 {
-  double mmm = 2147483647;   /* largest int  - MACHINE DEPENDENT!!!!!!!!   */
+  double mmm = 32767;   /* largest int  - MACHINE DEPENDENT!!!!!!!!   */
   float x;                   /* individual students may need to change mmm */ 
   x = rand()/mmm;            /* x should be uniform in [0,1] */
   return(x);
